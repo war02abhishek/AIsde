@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+
+    "aisde-rag": {
+      "command": "npx",
+      "args": ["ts-node", "--transpile-only", "src/mcp/server.ts"],
+      "cwd": "C:/SVN/coldPlayPhase3Development/AIsde",
+      "env": {
+        "OPENAI_API_KEY": "your-key-here",
+        "CHROMA_HOST": "localhost",
+        "CHROMA_PORT": "8000"
+      }
+    },
+
+    "mcp-fetch": {
+      "command": "C:/Users/Wanve.abhishek/AppData/Roaming/Python/Python312/Scripts/mcp-server-fetch.exe",
+      "args": [],
+      "env": {}
+    }
+
+  }
+}

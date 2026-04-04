@@ -45,6 +45,7 @@ import {
   chatApi, ingestApi, Citation,
   getEvalMetrics, runEvalDataset,
   EvalMetrics, EvalSummary,
+  ingestUrlApi, UrlIngestResponse,
 } from "./api";
 
 // Shape of a single chat message in the UI
@@ -73,6 +74,14 @@ export default function App() {
   const [docFilename, setDocFilename]   = useState("");
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading]       = useState(false);
+
+  // URL ingest state (Phase 6)
+  const [urlInput, setUrlInput]         = useState("");
+  const [urlStatus, setUrlStatus]       = useState<string | null>(null);
+  const [urlIngesting, setUrlIngesting] = useState(false);
+  // fetchMode toggle: "node" = our url_fetch (works on corporate proxy)
+  //                   "python" = mcp-server-fetch (better quality, may fail on proxy)
+  const [fetchMode, setFetchMode]       = useState<"python" | "node">("node");
 
   // ── Eval state (Phase 5) ──────────────────────────────────────
   const [liveMetrics, setLiveMetrics]       = useState<EvalMetrics | null>(null);
@@ -182,6 +191,27 @@ export default function App() {
     }
   }
 
+  /**
+   * Fetches a URL and ingests it into Chroma via POST /ingest-url (Phase 6)
+   * fetchMode controls which fetch tool is used:
+   *   "node"   → our url_fetch (Node.js + cheerio, works on corporate proxy)
+   *   "python" → mcp-server-fetch (Mozilla Readability, better quality)
+   */
+  async function handleUrlIngest() {
+    if (!urlInput.trim()) return;
+    setUrlIngesting(true);
+    setUrlStatus(null);
+    try {
+      const res = await ingestUrlApi(urlInput.trim(), undefined, undefined, fetchMode);
+      setUrlStatus(`✅ "${res.filename}" — ${res.chunksStored} chunks via ${res.source}`);
+      setUrlInput("");
+    } catch (err: any) {
+      setUrlStatus(`❌ ${err.message}`);
+    } finally {
+      setUrlIngesting(false);
+    }
+  }
+
   // ── Helpers — formatting functions for the eval dashboard ─────
   // pct: converts 0.875 → "88%"
   // ms:  converts 1240  → "1240ms"
@@ -263,33 +293,97 @@ export default function App() {
 
       {/* ── Upload Panel ── */}
       {uploadOpen && (
-        <div className="bg-gray-900 border-b border-gray-800 px-6 py-4 space-y-3">
-          <p className="text-sm text-gray-400">
-            Paste document text below and give it a filename. It will be chunked, embedded, and stored in Chroma.
-          </p>
-          <input
-            type="text"
-            placeholder="filename.txt"
-            value={docFilename}
-            onChange={(e) => setDocFilename(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          <textarea
-            placeholder="Paste document content here..."
-            value={docContent}
-            onChange={(e) => setDocContent(e.target.value)}
-            rows={5}
-            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
-          />
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleUpload}
-              disabled={uploading || !docContent.trim() || !docFilename.trim()}
-              className="px-4 py-2 text-sm rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 transition"
-            >
-              {uploading ? "Uploading..." : "Ingest Document"}
-            </button>
-            {uploadStatus && <span className="text-sm text-gray-300">{uploadStatus}</span>}
+        <div className="bg-gray-900 border-b border-gray-800 px-6 py-4 space-y-4">
+
+          {/* ── Section 1: Ingest URL (Phase 6) ── */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-gray-300">Ingest from URL</p>
+              {/* fetchMode toggle — choose which fetch tool to use */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">Fetch via:</span>
+                <div className="flex rounded-md overflow-hidden border border-gray-700">
+                  <button
+                    onClick={() => setFetchMode("node")}
+                    className={`text-xs px-2 py-1 transition ${
+                      fetchMode === "node"
+                        ? "bg-indigo-600 text-white"
+                        : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    }`}
+                  >
+                    ⚡ Node.js
+                  </button>
+                  <button
+                    onClick={() => setFetchMode("python")}
+                    className={`text-xs px-2 py-1 transition ${
+                      fetchMode === "python"
+                        ? "bg-green-700 text-white"
+                        : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    }`}
+                  >
+                    🐍 Python
+                  </button>
+                </div>
+                <span className="text-xs text-gray-600">
+                  {fetchMode === "node" ? "(cheerio, proxy-safe)" : "(Readability, better quality)"}
+                </span>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500">
+              Paste any URL — the page will be fetched, HTML stripped, chunked and stored in Chroma.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="https://example.com/docs"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleUrlIngest()}
+                className="flex-1 bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <button
+                onClick={handleUrlIngest}
+                disabled={urlIngesting || !urlInput.trim()}
+                className="px-4 py-2 text-sm rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 transition whitespace-nowrap"
+              >
+                {urlIngesting ? "Fetching..." : "Ingest URL"}
+              </button>
+            </div>
+            {urlStatus && <p className="text-xs text-gray-300">{urlStatus}</p>}
+          </div>
+
+          <div className="border-t border-gray-800" />
+
+          {/* ── Section 2: Ingest Text (original) ── */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-gray-300">Ingest from text</p>
+            <p className="text-sm text-gray-400">
+              Paste document text below and give it a filename.
+            </p>
+            <input
+              type="text"
+              placeholder="filename.txt"
+              value={docFilename}
+              onChange={(e) => setDocFilename(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <textarea
+              placeholder="Paste document content here..."
+              value={docContent}
+              onChange={(e) => setDocContent(e.target.value)}
+              rows={4}
+              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+            />
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleUpload}
+                disabled={uploading || !docContent.trim() || !docFilename.trim()}
+                className="px-4 py-2 text-sm rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 transition"
+              >
+                {uploading ? "Uploading..." : "Ingest Document"}
+              </button>
+              {uploadStatus && <span className="text-sm text-gray-300">{uploadStatus}</span>}
+            </div>
           </div>
         </div>
       )}

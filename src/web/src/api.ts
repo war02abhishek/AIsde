@@ -6,7 +6,7 @@
  * without knowing about fetch, headers, or error handling.
  *
  * PROXY:
- * Vite proxies /chat, /ingest, /health, /eval to http://localhost:3000
+ * Vite proxies /chat, /ingest, /health, /eval, /ingest-url to http://localhost:3000
  * (configured in vite.config.ts) so we don't need to hardcode the backend URL.
  */
 
@@ -29,6 +29,16 @@ export interface IngestResponse {
   success: boolean;
   chunksStored: number;
   filename: string;
+}
+
+// Phase 6: URL ingest response — includes title and source server info
+export interface UrlIngestResponse {
+  success: boolean;
+  chunksStored: number;
+  filename: string;
+  title?: string;
+  url: string;
+  source?: string; // "mcp-server-fetch" or "url_fetch-fallback"
 }
 
 // ── Phase 5: Eval types ───────────────────────────────────────────
@@ -108,6 +118,33 @@ export async function ingestApi(
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error ?? "Ingest request failed");
+  }
+  return res.json();
+}
+
+/**
+ * POST /ingest-url — fetches a URL and ingests it into Chroma via MCP tool chaining
+ * One call does: fetch URL → strip HTML → chunk → embed → store
+ *
+ * @param url       - URL to fetch and ingest (must be http/https)
+ * @param filename  - Optional custom document name (derived from URL if omitted)
+ * @param metadata  - Optional key-value metadata stored alongside chunks
+ * @param fetchMode - "python" = use mcp-server-fetch | "node" = use our url_fetch (default)
+ */
+export async function ingestUrlApi(
+  url: string,
+  filename?: string,
+  metadata?: Record<string, string>,
+  fetchMode: "python" | "node" = "node"
+): Promise<UrlIngestResponse> {
+  const res = await fetch("/ingest-url", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, filename, metadata, fetchMode }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error ?? "URL ingest failed");
   }
   return res.json();
 }

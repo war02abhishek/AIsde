@@ -22,7 +22,8 @@ export default defineConfig({
       "/chat":   "http://localhost:3000",
       "/ingest": "http://localhost:3000",
       "/health": "http://localhost:3000",
-      "/eval":   "http://localhost:3000",
+      "/eval":        "http://localhost:3000",
+      "/ingest-url":  "http://localhost:3000",
     },
   },
 });
