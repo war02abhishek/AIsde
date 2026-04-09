@@ -1,0 +1,49 @@
+# ── Dockerfile.express ────────────────────────────────────────────
+# Multi-stage build — compile once, run only dist/server/index.js
+# Includes external MCP servers: Python (uvx + mcp-server-fetch) + Node.js (npx)
+# ──────────────────────────────────────────────────────────────────
+
+# ── Stage 1: builder ──────────────────────────────────────────────
+FROM node:18-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+
+ENV NODE_OPTIONS=--max-old-space-size=4096
+RUN npm run build
+
+# ── Stage 2: runtime with external MCP servers ───────────────────
+FROM node:18-alpine
+WORKDIR /app
+
+# Install Python + pip + build dependencies for Python MCP servers
+RUN apk add --no-cache python3 py3-pip python3-dev build-base
+
+# Create virtual environment and install Python MCP servers
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip
+RUN pip install uvx mcp-server-fetch
+
+# Production deps only
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# Install global npm packages for MCP servers
+RUN npm install -g @modelcontextprotocol/server-github @modelcontextprotocol/server-filesystem
+
+# Copy only the compiled output needed for the Express server
+COPY --from=builder /app/dist ./dist
+
+EXPOSE 3000
+ENV NODE_ENV=production
+ENV PORT=3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/server/index.js"]

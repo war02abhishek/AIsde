@@ -49,7 +49,7 @@ import ingestRouter from "./routes/ingest";
 import evalRouter from "./routes/eval";
 import ingestUrlRouter from "./routes/ingest-url";
 import debugRouter from "./routes/debug";
-import { initMultiClient } from "../mcp/multi-client";
+import { initMultiClient } from "./multi-client";
 
 const app = express();
 const PORT = process.env.PORT ?? 3000;

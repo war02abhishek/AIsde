@@ -92,7 +92,7 @@
 // Same retrieval result as retrieve() but goes through the MCP protocol.
 // This means Cursor, Claude Desktop, or any MCP client can also call
 // the same rag_search tool — not just our agents.
-import { searchDocs } from "../../mcp/client";
+import { multiClient } from "../../server/multi-client";
 import { Citation } from "../schemas/answer";
 import { AgentState } from "./state";
 
@@ -150,7 +150,14 @@ export async function retrievalNode(
   // but now goes through the standard MCP protocol layer
   // Result shape: { chunks: string[], citations: [{source, score, preview}] }
   const mcpResults = await Promise.all(
-    state.queries.map((query) => searchDocs(query, 5))
+    state.queries.map(async (query) => {
+      const response = await multiClient.callTool("rag_search", { query, topK: 5 });
+      const text = (response.content as any[])[0]?.text ?? "{}";
+      return JSON.parse(text) as {
+        chunks: string[];
+        citations: Array<{ source: string; score?: number; preview: string }>;
+      };
+    })
   );
 
   // Deduplicate chunks across all query results
@@ -162,8 +169,8 @@ export async function retrievalNode(
   // Phase 6: result.chunks[i]           (full chunk from MCP response)
   const seen = new Map<string, Citation>();
 
-  mcpResults.forEach((result, queryIndex) => {
-    result.citations.forEach((c) => {
+  mcpResults.forEach((result: { chunks: string[]; citations: Array<{ source: string; score?: number; preview: string }> }, queryIndex: number) => {
+    result.citations.forEach((c: { source: string; score?: number; preview: string }) => {
       // MCP tool returns preview (truncated) — use full chunk from chunks array
       const fullChunk = result.chunks[result.citations.indexOf(c)] ?? c.preview;
       if (!seen.has(fullChunk)) {
@@ -193,7 +200,7 @@ export async function retrievalNode(
     .map((c, i) => `[${i + 1}] (${c.source}): ${c.chunk}`)
     .join("\n\n");
 
-  const totalRaw = mcpResults.reduce((sum, r) => sum + r.citations.length, 0);
+  const totalRaw = mcpResults.reduce((sum: number, r: { citations: Array<unknown> }) => sum + r.citations.length, 0);
   console.log(
     `[retrieval] Total unique chunks: ${dedupedCitations.length} (from ${totalRaw} raw results)`
   );

@@ -37,7 +37,7 @@
 
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { multiClient, fetchAndIngest } from "../../mcp/multi-client";
+import { multiClient, fetchAndIngest} from "../multi-client"
 
 const router = Router();
 

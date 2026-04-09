@@ -45,7 +45,7 @@ import {
   chatApi, ingestApi, Citation,
   getEvalMetrics, runEvalDataset,
   EvalMetrics, EvalSummary,
-  ingestUrlApi, UrlIngestResponse,
+  ingestUrlApi,
 } from "./api";
 
 // Shape of a single chat message in the UI

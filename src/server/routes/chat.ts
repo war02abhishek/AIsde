@@ -6,7 +6,13 @@
  *   - agentMode=false → Phase 1-3 baseline pipeline (retrieve → generate)
  *   - agentMode=true  → Phase 4 multi-agent graph (orchestrator → retrieval → critic)
  *
- * WHY KEEP BOTH?
+ * PHASE 6 REFACTOR:
+ *   - Baseline pipeline now uses multiClient.callTool("rag_search") instead of retrieve()
+ *   - retrieve() import commented out — kept for reference
+ *   - Both baseline and agent mode now go through the same MCP protocol layer
+ *   - In production (Model B): rag_search becomes an HTTP call to the MCP service
+ *
+ * WHY KEEP BOTH PIPELINES?
  *   This is a key production pattern: feature flags.
  *   You never rip out working code — you run both side by side
  *   and compare quality, latency, and cost before fully switching.
@@ -16,16 +22,16 @@
  *
  * PIPELINE (baseline, agentMode=false):
  *   Request → Zod validate
- *     → retrieve()              [Chroma top-k chunks]
- *     → formatMemoryForPrompt() [session history]
- *     → generate()              [LLM + structured output + retry]
+ *     → multiClient.callTool("rag_search") [MCP → Chroma top-k chunks]
+ *     → formatMemoryForPrompt()            [session history]
+ *     → generate()                         [LLM + structured output + retry]
  *     → addTurn() + maybeSummarize()
  *     → Response
  *
  * PIPELINE (agent mode, agentMode=true):
  *   Request → Zod validate
- *     → formatMemoryForPrompt() [session history]
- *     → runAgentGraph()         [orchestrator → retrieval → critic loop]
+ *     → formatMemoryForPrompt()  [session history]
+ *     → runAgentGraph()          [orchestrator → retrieval(MCP) → critic loop]
  *     → addTurn() + maybeSummarize()
  *     → Response
  *
@@ -39,12 +45,19 @@ import { Router, Request, Response } from "express";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { ChatResponseSchema } from "../../lib/schemas/answer";
-import { retrieve } from "../../lib/rag/retriever";
 import { generate } from "../../lib/rag/generator";
 import { addTurn, getSession } from "../../lib/memory/store";
 import { maybeSummarize, formatMemoryForPrompt } from "../../lib/memory/summarizer";
 import { runAgentGraph } from "../../lib/agents/graph";
 import { log, getLogs, CriticLogEntry } from "../../lib/observability/logger";
+import { multiClient } from "../multi-client";
+
+// ── PHASE 1-5: Direct retrieve() import (commented out — replaced by multiClient below) ──
+// retrieve() directly called embedText() + queryChunks() on Chroma.
+// Now we go through multiClient.callTool("rag_search") instead.
+// In production (Model B): this becomes an HTTP call to the MCP service.
+//
+// import { retrieve } from "../../lib/rag/retriever";
 
 const router = Router();
 
@@ -104,14 +117,53 @@ router.post("/", async (req: Request, res: Response) => {
       //   - Cost: agent (4-6 LLM calls) vs baseline (1-2 LLM calls)
       console.log(`[chat] Running baseline pipeline...`);
 
+      // ── PHASE 1-5: Direct retrieve() call (commented out — replaced by multiClient) ──
+      // retrieve() embedded the question + queried Chroma directly.
+      // Replaced by multiClient.callTool("rag_search") so baseline and agent mode
+      // both go through the same MCP protocol layer.
+      // In production (Model B): this becomes an HTTP call to the MCP service.
+      //
       // Step 1: Single retrieval (no query rewriting, no dedup)
-      const retrieved = await retrieve(message);
+      // const retrieved = await retrieve(message);
+      // answer    = generated.answer;
+      // citations = retrieved.citations;
+
+      // ── PHASE 6: Via multiClient rag_search (active) ─────────────
+      // Same result as retrieve() but goes through MCP protocol
+      // Routes to: in-process server (local) or MCP HTTP service (production)
+      console.log(`[chat] Calling rag_search via multiClient...`);
+      const ragResponse = await multiClient.callTool("rag_search", {
+        query: message,
+        topK: 5,
+      });
+
+      const ragResult = JSON.parse(
+        (ragResponse.content as any[])[0]?.text ?? "{}"
+      ) as {
+        chunks: string[];
+        citations: Array<{ source: string; score?: number; preview: string }>;
+      };
+
+      // Build context string from retrieved chunks (same format as retrieve())
+      // [1] (source.txt): chunk text...
+      const context = ragResult.chunks
+        .map((chunk, i) => `[${i + 1}] (${ragResult.citations[i]?.source ?? "unknown"}): ${chunk}`)
+        .join("\n\n");
+
+      // Map MCP citations to our Citation type
+      // MCP returns { source, score, preview } — we use full chunk from chunks[]
+      citations = ragResult.citations.map((c, i) => ({
+        source: c.source,
+        chunk:  ragResult.chunks[i] ?? c.preview,
+        score:  c.score,
+      }));
+
+      console.log(`[chat] rag_search returned ${citations.length} chunks`);
 
       // Step 2: Generate with memory (no critic, no retry)
-      const generated = await generate(message, retrieved.context, memory);
+      const generated = await generate(message, context, memory);
 
       answer            = generated.answer;
-      citations         = retrieved.citations;
       followUpQuestions = generated.followUpQuestions;
     }
 

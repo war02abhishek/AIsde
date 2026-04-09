@@ -1,0 +1,37 @@
+# ── Dockerfile.mcp ────────────────────────────────────────────────
+# Multi-stage build — compile once, run only dist/mcp/server.js
+# ──────────────────────────────────────────────────────────────────
+
+# ── Stage 1: builder ─────────────────────────────────────────────
+FROM node:18-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+
+ENV NODE_OPTIONS=--max-old-space-size=4096
+RUN npm run build
+
+# ── Stage 2: runtime ─────────────────────────────────────────────
+FROM node:18-alpine
+WORKDIR /app
+
+# Production deps only
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# Copy only the compiled output needed for the MCP server
+COPY --from=builder /app/dist ./dist
+
+EXPOSE 4000
+ENV HTTP_TRANSPORT=true
+ENV MCP_PORT=4000
+ENV NODE_ENV=production
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:4000/health || exit 1
+
+CMD ["node", "dist/mcp/server.js"]

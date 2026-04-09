@@ -1,13 +1,121 @@
+# ── docker-compose.yml ────────────────────────────────────────────
+#
+# THREE SERVICES (Model B architecture):
+#
+#   chroma   → Vector database (port 8000)
+#   mcp      → MCP HTTP server (port 4000) — rag_search, rag_ingest tools
+#   express  → Express API server (port 3000) — /chat, /ingest, /eval etc.
+#
+# SERVICE COMMUNICATION (internal Docker network):
+#   express → http://mcp:4000/mcp     (MCP tool calls)
+#   express → http://chroma:8000      (direct Chroma for debug route)
+#   mcp     → http://chroma:8000      (Chroma for rag_search/rag_ingest)
+#
+# USAGE:
+#   Start all:    docker compose up -d
+#   Logs:         docker compose logs -f
+#   Stop all:     docker compose down
+#   Rebuild:      docker compose up -d --build
+#   Reset data:   docker compose down -v  (WARNING: deletes Chroma data)
+#
+# ──────────────────────────────────────────────────────────────────
+
 services:
+
+  # ── Chroma Vector Database ───────────────────────────────────────
+  # Stores document embeddings + metadata
+  # Persistent via named volume — survives container restarts
   chroma:
     image: chromadb/chroma:latest
     ports:
       - "8000:8000"
     volumes:
-      - chroma_data:/chroma/chroma
+      - chroma_data:/data
     environment:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
 
+  # ── MCP HTTP Server ───────────────────────────────────────────────
+  # Exposes MCP tools over HTTP (Model B)
+  # Express calls this via MCP_SERVER_URL=http://mcp:4000
+  # Tools: rag_search, rag_ingest, url_fetch, url_ingest
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    ports:
+      - "4000:4000"       # exposed for local debugging
+    environment:
+      - HTTP_TRANSPORT=true
+      - MCP_PORT=4000
+      - NODE_ENV=production
+      # Chroma connection — uses service name "chroma" (Docker internal DNS)
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - CHROMA_COLLECTION=${CHROMA_COLLECTION:-aisde_docs}
+      # OpenAI — needed for embeddings (rag_ingest) and search (rag_search)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NODE_TLS_REJECT_UNAUTHORIZED=${NODE_TLS_REJECT_UNAUTHORIZED:-}
+    depends_on:
+      - chroma
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Express API Server ────────────────────────────────────────────
+  # Main backend — handles all HTTP routes from the React frontend
+  # Calls MCP service for tool operations (rag_search, rag_ingest)
+  # Now includes external MCP servers: mcp-server-fetch, GitHub, filesystem
+  express:
+    build:
+      context: .
+      dockerfile: Dockerfile.express
+    ports:
+      - "3000:3000"       # React frontend proxies to this
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      # MCP_SERVER_URL tells multi-client to use HTTP transport (Model B)
+      # "mcp" resolves to the mcp container via Docker internal DNS
+      - MCP_SERVER_URL=http://mcp:4000
+      # Chroma — needed for direct queries (debug route)
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - CHROMA_COLLECTION=${CHROMA_COLLECTION:-aisde_docs}
+      # OpenAI — needed for generate() in chat routes
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # External MCP servers
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    depends_on:
+      - chroma
+      - mcp
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── React Frontend (nginx) ────────────────────────────────────────
+  # Builds React app with Vite, serves via nginx on port 5173
+  # nginx proxies /chat, /ingest etc. → express container
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "5173:80"
+    depends_on:
+      express:
+        condition: service_healthy
+
 volumes:
+  # Named volume for Chroma data persistence
+  # Data survives: container restarts, docker compose down
+  # Data deleted:  docker compose down -v
   chroma_data:

@@ -66,14 +66,14 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-import { handleRagSearch } from "./tools/rag_search";
-import { handleRagIngest } from "./tools/rag_ingest";
-import { handleUrlFetch } from "./tools/url_fetch";
-import { handleUrlIngest } from "./tools/url_ingest";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { handleRagSearch } from "../mcp/tools/rag_search";
+import { handleRagIngest } from "../mcp/tools/rag_ingest";
+import { handleUrlFetch } from "../mcp/tools/url_fetch";
+import { handleUrlIngest } from "../mcp/tools/url_ingest";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -104,71 +104,46 @@ export class MultiMcpClient {
   /**
    * Connects to our own in-process MCP server
    * Uses InMemoryTransport — no child process, no network
+   * Used in LOCAL DEV when MCP_SERVER_URL is not set
    *
    * This is always connected — it's our core server.
    */
   async connectInProcess(): Promise<void> {
     console.log("[multi-client] Connecting to in-process aisde-rag server...");
 
-    // Create in-process server with all our tools
-    const inProcessServer = new McpServer({
-      name: "aisde-rag",
-      version: "1.0.0",
+    const inProcessServer = new Server(
+      { name: "aisde-rag", version: "1.0.0" },
+      { capabilities: { tools: {} } }
+    );
+
+    (inProcessServer as any).setRequestHandler("tools/list", async () => ({
+      tools: [
+        { name: "rag_search", description: "Search the RAG knowledge base.", inputSchema: { type: "object", properties: { query: { type: "string" }, topK: { type: "number" } }, required: ["query"] } },
+        { name: "rag_ingest", description: "Ingest a document into the RAG knowledge base.", inputSchema: { type: "object", properties: { content: { type: "string" }, filename: { type: "string" }, metadata: { type: "object" } }, required: ["content", "filename"] } },
+        { name: "url_fetch",  description: "Fetch a URL and return clean text.", inputSchema: { type: "object", properties: { url: { type: "string" }, maxChars: { type: "number" } }, required: ["url"] } },
+        { name: "url_ingest", description: "Fetch a URL and ingest into RAG.", inputSchema: { type: "object", properties: { url: { type: "string" }, filename: { type: "string" }, metadata: { type: "object" } }, required: ["url"] } },
+      ],
+    }));
+
+    (inProcessServer as any).setRequestHandler("tools/call", async (req: any) => {
+      const { name, arguments: args = {} } = req.params as { name: string; arguments: Record<string, unknown> };
+      switch (name) {
+        case "rag_search": return handleRagSearch(args as { query: string; topK?: number });
+        case "rag_ingest": return handleRagIngest(args as { content: string; filename: string; metadata?: Record<string, string> });
+        case "url_fetch":  return handleUrlFetch(args as { url: string; maxChars?: number });
+        case "url_ingest": return handleUrlIngest(args as { url: string; filename?: string; metadata?: Record<string, string> });
+        default: throw new Error(`Unknown tool: ${name}`);
+      }
     });
 
-    inProcessServer.registerTool("rag_search", {
-      description: "Search the RAG knowledge base for relevant document chunks.",
-      inputSchema: {
-        query: z.string().min(1),
-        topK:  z.number().optional().default(5),
-      },
-    }, async ({ query, topK }) => handleRagSearch({ query, topK }));
-
-    inProcessServer.registerTool("rag_ingest", {
-      description: "Ingest a document into the RAG knowledge base.",
-      inputSchema: {
-        content:  z.string().min(1),
-        filename: z.string().min(1),
-        metadata: z.record(z.string()).optional(),
-      },
-    }, async ({ content, filename, metadata }) => handleRagIngest({ content, filename, metadata }));
-
-    inProcessServer.registerTool("url_fetch", {
-      description: "Fetches a URL and returns clean readable text (our fallback fetcher).",
-      inputSchema: {
-        url:      z.string().min(1),
-        maxChars: z.number().optional().default(15000),
-      },
-    }, async ({ url, maxChars }) => handleUrlFetch({ url, maxChars }));
-
-    inProcessServer.registerTool("url_ingest", {
-      description: "Fetches a URL and ingests its content into the RAG knowledge base.",
-      inputSchema: {
-        url:      z.string().min(1),
-        filename: z.string().optional(),
-        metadata: z.record(z.string()).optional(),
-      },
-    }, async ({ url, filename, metadata }) => handleUrlIngest({ url, filename, metadata }));
-
-    // Wire client ↔ server via in-memory transport
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await inProcessServer.connect(serverTransport);
 
     const client = new Client({ name: "aisde-multi-client", version: "1.0.0" });
     await client.connect(clientTransport);
 
-    // Register in our server map
-    this.servers.set("aisde-rag", {
-      name: "aisde-rag",
-      client,
-      tools: ["rag_search", "rag_ingest", "url_fetch", "url_ingest"],
-    });
-
-    // Register tools in the routing registry
-    ["rag_search", "rag_ingest", "url_fetch", "url_ingest"].forEach((t) =>
-      this.toolRegistry.set(t, "aisde-rag")
-    );
-
+    this.servers.set("aisde-rag", { name: "aisde-rag", client, tools: ["rag_search", "rag_ingest", "url_fetch", "url_ingest"] });
+    ["rag_search", "rag_ingest", "url_fetch", "url_ingest"].forEach((t) => this.toolRegistry.set(t, "aisde-rag"));
     console.log("[multi-client] aisde-rag connected. Tools: rag_search, rag_ingest, url_fetch, url_ingest");
   }
 
@@ -330,6 +305,63 @@ export class MultiMcpClient {
   getConnectedServers(): string[] {
     return Array.from(this.servers.keys());
   }
+
+  /**
+   * Connects to a REMOTE MCP server via HTTP transport (production, Model B)
+   * Used when MCP_SERVER_URL env var is set
+   *
+   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   * HOW HTTP TRANSPORT WORKS:
+   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   *
+   * StreamableHTTPClientTransport sends POST requests to the MCP server:
+   *
+   *   Express container (this code)    MCP container (server.ts HTTP mode)
+   *       │                                    │
+   *       │── POST http://mcp:4000/mcp ──────▶│  handles request
+   *       │◀─ JSON response ────────────────│  returns result
+   *
+   * COMPARE WITH InMemoryTransport (local dev):
+   *   InMemory:  no network, same process, zero latency
+   *   HTTP:      network hop, separate process, ~1-5ms latency
+   *
+   * The tool call API (callTool, searchDocs etc.) is IDENTICAL.
+   * Only the transport changes — that's the beauty of MCP.
+   *
+   * @param serverUrl - Full URL of the MCP HTTP server e.g. http://mcp-service:4000
+   */
+  async connectHttp(serverUrl: string): Promise<void> {
+    console.log(`[multi-client] Connecting to remote MCP server via HTTP: ${serverUrl}`);
+
+    const maxRetries = 10;
+    const retryDelayMs = 3000;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const transport = new StreamableHTTPClientTransport(new URL(`${serverUrl}/mcp`));
+        const client = new Client({ name: "aisde-http-client", version: "1.0.0" });
+        await client.connect(transport);
+
+        const toolsResponse = await client.listTools();
+        const toolNames = toolsResponse.tools.map((t) => t.name);
+
+        console.log(`[multi-client] Remote MCP server connected. Tools: ${toolNames.join(", ")}`);
+        this.servers.set("aisde-rag", { name: "aisde-rag", client, tools: toolNames });
+        toolNames.forEach((t) => this.toolRegistry.set(t, "aisde-rag"));
+        return;
+
+      } catch (err: any) {
+        console.warn(`[multi-client] Attempt ${attempt}/${maxRetries} failed: ${err.message}`);
+        if (attempt < maxRetries) {
+          console.warn(`[multi-client] Retrying in ${retryDelayMs / 1000}s...`);
+          await new Promise((r) => setTimeout(r, retryDelayMs));
+        } else {
+          console.error(`[multi-client] All ${maxRetries} attempts failed. Falling back to in-process server.`);
+          await this.connectInProcess();
+        }
+      }
+    }
+  }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -359,42 +391,70 @@ export async function initMultiClient(): Promise<void> {
   if (initialized) return;
   initialized = true;
 
-  // Step 1: Always connect our in-process server first
-  await multiClient.connectInProcess();
+  // ── Transport selection based on MCP_SERVER_URL env var ────────────────────────
+  //
+  // LOCAL DEV (MCP_SERVER_URL not set):
+  //   Uses InMemoryTransport — MCP server runs in-process
+  //   No network hop, fastest possible, no extra process needed
+  //
+  // PRODUCTION / Model B (MCP_SERVER_URL=http://mcp-service:4000):
+  //   Uses StreamableHTTPClientTransport — MCP server is a separate container
+  //   Express container calls MCP container over HTTP
+  //
+  // This single env var is the ONLY thing that changes between local and production.
+  // All tool calls (callTool, searchDocs, ingestDoc etc.) stay identical.
+  const mcpServerUrl = process.env.MCP_SERVER_URL;
 
-  // Step 2: Connect the official Python mcp-server-fetch
-  // Installed via: pip install mcp-server-fetch --user
-  // Executable: C:\Users\Wanve.abhishek\AppData\Roaming\Python\Python312\Scripts\mcp-server-fetch.exe
-  //
-  // WHY DIRECT EXECUTABLE instead of uvx?
-  //   uvx failed due to corporate security policy (PE resource modification blocked).
-  //   Direct executable path works since pip already installed it successfully.
-  //
-  // WHAT mcp-server-fetch GIVES US OVER OUR url_fetch:
-  //   - Uses Mozilla Readability algorithm (same as Firefox reader mode)
-  //   - Returns clean markdown instead of plain text
-  //   - Better at extracting main content, ignoring ads/nav/footers
-  //   - Handles more edge cases (redirects, encoding, etc.)
-  //
-  // TO SWITCH BACK TO OUR TypeScript fetch server:
-  //   Change to: "npx", ["ts-node", "--transpile-only", "src/mcp/fetch-server.ts"]
-  // Step 2: Connect Python mcp-server-fetch
-  // Installed via: pip install mcp-server-fetch --user
-  // May fail on corporate proxies due to SSL cert issues with robots.txt prefetch.
-  // The UI toggle (Node.js / Python) lets the user choose which fetcher to use.
-  // If Python server fails to connect, Node.js fallback is always available.
+  if (mcpServerUrl) {
+    // ── PRODUCTION: HTTP transport (Model B) ──────────────────────────────
+    // MCP server is a separate service — connect to it over HTTP
+    console.log(`[multi-client] MCP_SERVER_URL=${mcpServerUrl} — production HTTP mode`);
+    await multiClient.connectHttp(mcpServerUrl);
+  } else {
+    // ── LOCAL DEV: InMemory transport ──────────━─────────────────────────
+    // MCP server runs in-process — no network, no extra container
+    console.log(`[multi-client] MCP_SERVER_URL not set — local dev in-process mode`);
+    await multiClient.connectInProcess();
+  }
+
+  // Step 2: Connect external MCP servers
+  // Now available in both local dev and Docker production
+  console.log(`[multi-client] Connecting external stdio servers...`);
+  
+  // Option 1: Python mcp-server-fetch (better web scraping)
   await multiClient.connectExternal(
-    "mcp-fetch",
-    "C:\\Users\\Wanve.abhishek\\AppData\\Roaming\\Python\\Python312\\Scripts\\mcp-server-fetch.exe",
-    [],
+    "mcp-fetch", 
+    "uvx", 
+    ["mcp-server-fetch"],
     {
-      HTTP_PROXY:         process.env.HTTPS_PROXY ?? "",
-      HTTPS_PROXY:        process.env.HTTPS_PROXY ?? "",
-      PYTHONHTTPSVERIFY:  "0",
-      CURL_CA_BUNDLE:     "",
+      HTTP_PROXY: process.env.HTTPS_PROXY ?? "",
+      HTTPS_PROXY: process.env.HTTPS_PROXY ?? "",
+      PYTHONHTTPSVERIFY: "0",
+      CURL_CA_BUNDLE: "",
       REQUESTS_CA_BUNDLE: "",
     }
   );
+  
+  // Option 2: GitHub MCP server (if you have GitHub token)
+  if (process.env.GITHUB_TOKEN) {
+    await multiClient.connectExternal(
+      "github",
+      "npx",
+      ["-y", "@modelcontextprotocol/server-github"],
+      {
+        GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN,
+      }
+    );
+  }
+  
+  // Option 3: Filesystem MCP server
+  await multiClient.connectExternal(
+    "filesystem",
+    "npx",
+    ["-y", "@modelcontextprotocol/server-filesystem", "/app"]
+  );
+
+
 
   const servers = multiClient.getConnectedServers();
   const tools   = await multiClient.listAllTools();

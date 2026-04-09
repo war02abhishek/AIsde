@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server/index.ts",
     "mcp": "ts-node-dev --respawn --transpile-only src/mcp/server.ts",
-    "build": "tsc",
+    "build": "node --max-old-space-size=40960 node_modules/typescript/bin/tsc",
     "start": "node dist/server/index.js"
   },
   "dependencies": {
