@@ -27,7 +27,8 @@ RUN apk add --no-cache python3 py3-pip python3-dev build-base
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip
-RUN pip install uvx mcp-server-fetch
+RUN pip install uv
+RUN pip install mcp-server-fetch
 
 # Production deps only
 COPY package*.json ./
